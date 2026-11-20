@@ -73,6 +73,62 @@ export const vulnScanApi = {
     return handleResponse(res);
   },
 
+  async runSslAudit({ target, port = 443, explicitAuthorization = false }) {
+    const res = await fetch(`${API_BASE_URL}/api/ssl/scan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target,
+        port,
+        explicit_authorization: explicitAuthorization,
+      }),
+    });
+    return handleResponse(res);
+  },
+
+  async runVulnerabilityScan({ target, explicitAuthorization = false }) {
+    const res = await fetch(`${API_BASE_URL}/api/vulnerabilities/scan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target,
+        explicit_authorization: explicitAuthorization,
+      }),
+    });
+    return handleResponse(res);
+  },
+
+  async runDirectoryScan({ target, explicitAuthorization = false }) {
+    const res = await fetch(`${API_BASE_URL}/api/dirs/scan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target,
+        explicit_authorization: explicitAuthorization,
+      }),
+    });
+    return handleResponse(res);
+  },
+
+  async runSecurityTesting({
+    target,
+    policies = { sql: true, xss: true, csrf: true, cors: true },
+    rateCap = 5,
+    explicitAuthorization = false,
+  }) {
+    const res = await fetch(`${API_BASE_URL}/api/testing/scan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target,
+        policies,
+        rate_cap: rateCap,
+        explicit_authorization: explicitAuthorization,
+      }),
+    });
+    return handleResponse(res);
+  },
+
   async runDnsRecon(domain) {
     const res = await fetch(
       `${API_BASE_URL}/api/recon/dns?domain=${encodeURIComponent(domain)}`

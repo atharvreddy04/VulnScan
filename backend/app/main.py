@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import Base, engine
-from app.routers import dashboard, network, recon, vulnerabilities, web
+from app.routers import dashboard, dirs, network, recon, ssl, testing, vulnerabilities, web
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -15,7 +15,7 @@ app = FastAPI(title="VulnScan Security Assessment API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -24,8 +24,11 @@ app.add_middleware(
 app.include_router(dashboard.router)
 app.include_router(network.router)
 app.include_router(web.router)
+app.include_router(ssl.router)
 app.include_router(vulnerabilities.router)
 app.include_router(recon.router)
+app.include_router(dirs.router)
+app.include_router(testing.router)
 
 
 @app.get("/api/health")

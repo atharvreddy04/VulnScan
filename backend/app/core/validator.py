@@ -1,91 +1,111 @@
 import ipaddress
-import re
+import os
 import socket
+import sqlite3
 from urllib.parse import urlparse
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
-from app.models.models import Target, AuditLog
 
-DOMAIN_REGEX = re.compile(
-    r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$"
-)
+# Permission-granted public security testing sandboxes
+DEFAULT_TEST_DOMAINS = {
+    "scanme.nmap.org",
+    "testphp.vulnweb.com",
+    "example.com",
+}
 
-def normalize_target(raw_target: str) -> str:
-    """Extracts clean hostname or IP from a URL, IP, or domain string."""
-    cleaned = raw_target.strip()
-    if "://" in cleaned:
-        parsed = urlparse(cleaned)
-        cleaned = parsed.hostname or ""
-    else:
-        cleaned = cleaned.split("/")[0].split(":")[0]
-    return cleaned.lower()
+# Cloud metadata and link-local ranges that must always be blocked on Render/AWS/GCP
+BLOCKED_NETWORKS = [
+    ipaddress.ip_network("169.254.0.0/16"),  # AWS/Render/GCP metadata & link-local
+    ipaddress.ip_network("100.64.0.0/10"),   # Carrier-grade NAT / internal cloud mesh
+]
 
-def is_private_or_loopback(host: str) -> bool:
-    """Checks if an IP or resolved domain belongs to RFC 1918 private or loopback ranges."""
-    if host in {"localhost", "127.0.0.1", "::1"}:
-        return True
-    try:
-        ip_obj = ipaddress.ip_address(host)
-        return ip_obj.is_private or ip_obj.is_loopback
-    except ValueError:
-        try:
-            resolved_ip = socket.gethostbyname(host)
-            ip_obj = ipaddress.ip_address(resolved_ip)
-            return ip_obj.is_private or ip_obj.is_loopback
-        except socket.gaierror:
-            return False
+PRIVATE_LAB_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+]
+
+
+def _get_allowed_domains() -> set[str]:
+    env_domains = os.getenv("AUTHORIZED_EXTERNAL_DOMAINS", "")
+    extra = {
+        d.strip().lower()
+        for d in env_domains.split(",")
+        if d.strip()
+    }
+    return DEFAULT_TEST_DOMAINS | extra
+
+
+def _extract_host(raw_target: str) -> str:
+    candidate = raw_target.strip()
+    if "://" in candidate:
+        parsed = urlparse(candidate)
+        return (parsed.hostname or "").lower()
+    return candidate.split("/")[0].split(":")[0].lower()
+
 
 def validate_and_authorize_target(
-    raw_target: str, db: Session, explicit_authorization: bool = False
-) -> Target:
-    host = normalize_target(raw_target)
-    if not host:
-        raise HTTPException(status_code=400, detail="Invalid target host.")
-
-    # Validate syntax (IP or valid domain/localhost)
-    is_valid_ip = False
-    try:
-        ipaddress.ip_address(host)
-        is_valid_ip = True
-    except ValueError:
-        pass
-
-    if not is_valid_ip and host != "localhost" and not DOMAIN_REGEX.match(host):
-        raise HTTPException(status_code=400, detail=f"Malformed target format: {host}")
-
-    target_record = db.query(Target).filter(Target.host == host).first()
-    private_scope = is_private_or_loopback(host)
-
-    # Allow if RFC 1918/loopback OR explicitly authorized in DB / confirmed by user
-    authorized = private_scope or explicit_authorization or (
-        target_record is not None and target_record.is_authorized
-    )
-
-    if not authorized:
-        db.add(AuditLog(
-            action="scope_validation",
-            target_host=host,
-            status="blocked",
-            reason="Public target requires explicit authorization confirmation."
-        ))
-        db.commit()
+    raw_target: str,
+    db: sqlite3.Connection,
+    explicit_authorization: bool,
+) -> int:
+    if not explicit_authorization:
         raise HTTPException(
             status_code=403,
-            detail=f"Target '{host}' is a public address and requires explicit authorization before scanning."
+            detail="Explicit written authorization checkbox must be confirmed.",
         )
 
-    if not target_record:
-        target_record = Target(host=host, is_authorized=True)
-        db.add(target_record)
-    elif explicit_authorization and not target_record.is_authorized:
-        target_record.is_authorized = True
+    host = _extract_host(raw_target)
+    if not host:
+        raise HTTPException(status_code=400, detail="Invalid target host or URL.")
 
-    db.add(AuditLog(
-        action="scope_validation",
-        target_host=host,
-        status="allowed",
-        reason="RFC1918/Loopback" if private_scope else "Explicitly Authorized"
-    ))
+    allowed_domains = _get_allowed_domains()
+    is_allowed = False
+
+    # 1. Check if input is a direct IPv4/IPv6 address
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        if any(ip_obj in net for net in BLOCKED_NETWORKS):
+            raise HTTPException(
+                status_code=403,
+                detail="Blocked by SSRF Guardrail: Link-local and cloud metadata IPs are forbidden.",
+            )
+        if any(ip_obj in net for net in PRIVATE_LAB_NETWORKS):
+            is_allowed = True
+    except ValueError:
+        # 2. Input is a hostname/domain
+        if host == "localhost" or host.endswith((".local", ".lab")):
+            is_allowed = True
+        elif host in allowed_domains or any(
+            host.endswith(f".{domain}") for domain in allowed_domains
+        ):
+            # Resolve DNS to verify the domain does not point to a blocked metadata IP
+            try:
+                resolved_ip = ipaddress.ip_address(socket.gethostbyname(host))
+                if any(resolved_ip in net for net in BLOCKED_NETWORKS):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Blocked by SSRF Guardrail: Domain resolves to restricted internal metadata space.",
+                    )
+            except socket.gaierror:
+                pass
+            is_allowed = True
+
+    if not is_allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Target '{host}' is outside the authorized scope. "
+                "Use an RFC 1918 lab IP, .local/.lab host, or add the domain to AUTHORIZED_EXTERNAL_DOMAINS."
+            ),
+        )
+
+    cur = db.cursor()
+    cur.execute(
+        "INSERT OR IGNORE INTO targets (host, is_authorized) VALUES (?, 1)",
+        (host,),
+    )
+    cur.execute("SELECT id FROM targets WHERE host = ?", (host,))
+    target_id = cur.fetchone()[0]
     db.commit()
-    db.refresh(target_record)
-    return target_record
+    return target_id

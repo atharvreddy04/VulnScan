@@ -1,18 +1,50 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+import json
+import sqlite3
+from pathlib import Path
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./vaptx.db"
+DB_PATH = Path(__file__).resolve().parent.parent / "vulnscan.db"
 
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+
+class Base:
+    class metadata:
+        @staticmethod
+        def create_all(bind=None):
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS targets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        host TEXT UNIQUE NOT NULL,
+                        is_authorized INTEGER DEFAULT 1
+                    );
+                    CREATE TABLE IF NOT EXISTS scans (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        target_id INTEGER,
+                        scan_type TEXT,
+                        profile TEXT,
+                        status TEXT,
+                        summary TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS findings (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scan_id INTEGER,
+                        module TEXT,
+                        title TEXT,
+                        severity TEXT,
+                        remediation TEXT,
+                        details TEXT
+                    );
+                    """
+                )
+
+
+engine = None
 
 
 def get_db():
-    db = SessionLocal()
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
     try:
-        yield db
+        yield conn
     finally:
-        db.close()
+        conn.close()
